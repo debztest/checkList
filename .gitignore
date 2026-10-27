@@ -1,0 +1,15 @@
+# チェックリストのデータ（個人の作業内容）と、人ごとの設定ファイルは登録しない
+checklist.txt
+*.history.txt
+*.numbers.txt
+attachments/
+*.v1.bak
+StickyChecklist.ini
+
+# ビルド時に退避される古い exe
+*.old
+
+# 本体 exe はインストーラーに入っているので登録しない（配布はインストーラー）
+StickyChecklist.exe
+*.ini.bak*
+checklist.txt.*
