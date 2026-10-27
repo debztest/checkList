@@ -13,3 +13,6 @@ StickyChecklist.ini
 StickyChecklist.exe
 *.ini.bak*
 checklist.txt.*
+
+# インストール時に置く ini のひな形（チームのメンバー名などを書くので登録しない。build.ps1 がインストーラーに埋め込む）
+StickyChecklist.default.ini

@@ -24,12 +24,15 @@ if (Test-Path $out) { Move-Item $out $old -Force }
 if ($LASTEXITCODE -ne 0) { throw 'ビルドに失敗しました' }
 "作成しました: $out"
 
-# インストーラー（本体 exe を中に入れる）
+# インストーラー（本体 exe と、あれば ini のひな形 StickyChecklist.default.ini を中に入れる）
 $setup = Join-Path $here 'StickyChecklistSetup.exe'
+$defaultIni = Join-Path $here 'StickyChecklist.default.ini'
+$iniRes = @()
+if (Test-Path $defaultIni) { $iniRes = @("/resource:$defaultIni,StickyChecklist.default.ini") }
 & $csc /nologo /target:winexe /optimize+ /codepage:65001 `
     "/out:$setup" `
     "/win32icon:$(Join-Path $here 'StickyChecklist.ico')" `
-    "/resource:$out,StickyChecklist.exe" `
+    "/resource:$out,StickyChecklist.exe" @iniRes `
     /reference:System.Windows.Forms.dll /reference:System.Drawing.dll `
     (Join-Path $here 'Setup.cs') (Join-Path $here 'Shortcut.cs')
 if ($LASTEXITCODE -ne 0) { throw 'インストーラーのビルドに失敗しました' }

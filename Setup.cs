@@ -16,8 +16,8 @@ static class Setup
     const string AppName = Shortcut.AppName;
     const string ExeName = "StickyChecklist.exe";
     const string IniName = "StickyChecklist.ini";
-    // 設定ファイルのひな形の配布元（セットアップと同じフォルダに ini が無いとき、ここの設定を引き継ぐ。読むだけで書き換えない）
-    const string DefaultIniSource = @"\\192.168.1.221\WebApps\CheckList\StickyChecklist.ini";
+    const string DefaultIniName = "StickyChecklist.default.ini";   // build.ps1 が埋め込む ini のひな形
+    const string UnknownName = "unknown";                          // ひな形の UserName
 
     [STAThread]
     static void Main()
@@ -63,15 +63,16 @@ static class Setup
         return text.Insert(at, key + "=" + value + "\r\n");
     }
 
-    // 新しく置く ini のひな形：セットアップと同じフォルダの ini、無ければ配布元の ini。どちらも無ければ null
-    public static string FindIniTemplate()
+    // 新しく置く ini の中身：セットアップと同じフォルダに ini があればそれ、無ければ埋め込んだひな形。どちらも無ければ null
+    public static string ReadIniTemplate()
     {
         string local = Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), IniName);
-        foreach (string p in new[] { local, DefaultIniSource })
+        if (File.Exists(local)) return File.ReadAllText(local, Encoding.UTF8);
+        using (var src = Assembly.GetExecutingAssembly().GetManifestResourceStream(DefaultIniName))
         {
-            try { if (File.Exists(p)) return p; } catch { }
+            if (src == null) return null;
+            using (var r = new StreamReader(src, Encoding.UTF8)) return r.ReadToEnd();
         }
-        return null;
     }
 
     public static bool IsAppRunning()
@@ -132,11 +133,12 @@ static class Setup
             };
 
             // 名前（共有した項目の作成者・記入者として表示される）。入れ直したときは今の設定を出す
-            var lblName = new Label { Text = "あなたの名前（共有した項目の作成者として表示されます）", AutoSize = true, Location = new Point(16, 128) };
+            var lblName = new Label { Text = "あなたの名前（共有した項目の作成者として表示。空欄なら " + UnknownName + "）", AutoSize = true, Location = new Point(16, 128) };
             txtName.Location = new Point(16, 148);
             txtName.Width = 200;
             string installed = FindInstalledDir();
             if (installed != null) txtName.Text = ReadIniValue(Path.Combine(installed, IniName), "UserName") ?? "";
+            if (txtName.Text == UnknownName) txtName.Text = "";
 
             chkDesktop.Text = "デスクトップにショートカットを作る";
             chkStartup.Text = "Windows 起動時に自動で立ち上げる（スタートアップに登録）";
@@ -172,7 +174,6 @@ static class Setup
             string dir = txtDir.Text.Trim();
             if (dir == "") { MessageBox.Show(this, "インストール先を指定してください。", Text); return; }
             string name = txtName.Text.Trim();
-            if (name == "") { MessageBox.Show(this, "あなたの名前を入力してください。", Text); txtName.Focus(); return; }
 
             // 起動中だと exe を置き換えられないので閉じてもらう
             while (IsAppRunning())
@@ -196,21 +197,12 @@ static class Setup
                     src.CopyTo(dst);
                 }
 
-                // 設定ファイル：すでにあればそのまま、無ければひな形（共有フォルダなどを設定済みの ini）の設定を引き継ぐ。
-                // ひな形の名前と自分用の保存先は他の人のものなので、名前は入力したもの・保存先は既定に置き換える
+                // 設定ファイル：すでにあればそのまま、無ければひな形（共有先などを設定済み）から作る。名前を入れたときはその名前にする
                 string iniDst = Path.Combine(dir, IniName);
-                string ini;
-                if (File.Exists(iniDst)) ini = File.ReadAllText(iniDst, Encoding.UTF8);
-                else
-                {
-                    Cursor = Cursors.WaitCursor;
-                    string tmpl = FindIniTemplate();
-                    Cursor = Cursors.Default;
-                    ini = tmpl != null
-                        ? SetIniValue(File.ReadAllText(tmpl, Encoding.UTF8), "PersonalFile", "checklist.txt")
-                        : "[基本]\r\n";
-                }
-                File.WriteAllText(iniDst, SetIniValue(ini, "UserName", name), new UTF8Encoding(true));
+                string ini = File.Exists(iniDst) ? File.ReadAllText(iniDst, Encoding.UTF8) : ReadIniTemplate();
+                if (ini == null) ini = "[基本]\r\nUserName=" + UnknownName + "\r\n";
+                if (name != "") ini = SetIniValue(ini, "UserName", name);
+                File.WriteAllText(iniDst, ini, new UTF8Encoding(true));
 
                 // 別の場所から移す場合は、チェックリストのデータを引き継ぐか聞く
                 if (oldDir != null && !string.Equals(Path.GetFullPath(oldDir).TrimEnd('\\'), Path.GetFullPath(dir).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
