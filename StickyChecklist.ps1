@@ -2357,18 +2357,22 @@ function Update-FromStore([bool]$shared, [switch]$Force, [switch]$Initial) {
         if ($row) {
             if ($row.Tag.dirty -or $row.Tag.shared -ne $shared) { continue }   # 自分の未保存の変更を優先
             if ((ConvertTo-ItemLine (ConvertTo-Record $row)) -ne (ConvertTo-ItemLine $rec)) {
+                $before = ConvertTo-Record $row
                 Set-RowFromRecord $row $rec $shared
                 if ($byOther) { Set-Flash $row '更新'; Add-RecentEditor $rec.updatedBy }
+                if ($byOther -and $shared) { Push-OtherUndo $row $before $rec }
                 $changed = $true
             }
         } else {
             $row = Add-RowFromRecord $rec $shared
             if ($byOther) { Set-Flash $row 'New'; Add-RecentEditor $rec.updatedBy }
+            if ($byOther -and $shared) { Push-OtherUndo $row $null $rec }
             $changed = $true
         }
     }
     # ファイルから消えた（または共有範囲から外れた）項目を消す
     foreach ($r in @($flow.Controls | Where-Object { $_.Tag.shared -eq $shared -and -not $_.Tag.dirty -and -not $seen.ContainsKey($_.Tag.id) })) {
+        if ($shared -and -not $Initial) { Push-OtherUndo $r (ConvertTo-Record $r) $null }   # 誰が消したかは分からない
         $flow.Controls.Remove($r)
         $r.Dispose()
         $changed = $true
@@ -3080,6 +3084,7 @@ function Start-TypingWatch {
 # ---------- 元に戻す・やり直す（↶ ↷ / Ctrl＋Z・Ctrl＋Y） ----------
 # 操作ごとに「変える前」と「変えた後」の項目の内容を覚えておき、戻すときは前の内容、やり直すときは後の内容に置き換える。
 # 内容が $null は「その項目がない」状態（追加の前・削除の後）。自分用⇔共有の切り替えは戻せない。
+# 他の人が共有項目を変えたもの（読み込んだとき）も other 付きで積む。↶・Ctrl＋Z の 1 回では飛ばし、右クリックの一覧から戻す。
 $script:undoStack = New-Object System.Collections.ArrayList
 $script:redoStack = New-Object System.Collections.ArrayList
 
@@ -3094,13 +3099,30 @@ function New-UndoItem($row, $before, $after) {
     return [pscustomobject]@{ id = $row.Tag.id; shared = $row.Tag.shared; before = (Copy-Rec $before); after = (Copy-Rec $after) }
 }
 
-function Push-Undo([string]$label, $items) {
+function Push-Undo([string]$label, $items, [switch]$Other) {
     $items = @($items | Where-Object { $_ })
     if ($items.Count -eq 0) { return }
-    $script:undoStack.Add([pscustomobject]@{ label = $label; items = $items; at = (Get-Date).ToString('HH:mm') }) | Out-Null
-    while ($script:undoStack.Count -gt 50) { $script:undoStack.RemoveAt(0) }
-    $script:redoStack.Clear()   # 新しい操作をしたら、やり直しの分は消える
+    $script:undoStack.Add([pscustomobject]@{ label = $label; items = $items; at = (Get-Date).ToString('HH:mm'); other = [bool]$Other }) | Out-Null
+    while ($script:undoStack.Count -gt 100) { $script:undoStack.RemoveAt(0) }
+    if (-not $Other) { $script:redoStack.Clear() }   # 自分が新しい操作をしたら、やり直しの分は消える
     Update-UndoButtons
+}
+
+# 他の人による共有項目の変更（$before・$after が $null なら追加・削除）
+function Push-OtherUndo($row, $before, $after) {
+    $what = if ($null -eq $before) { '追加' }
+        elseif ($null -eq $after) { '削除' }
+        elseif ($before.done -ne $after.done) { if ($after.done -eq '1') { 'チェックを付けた' } else { 'チェックを外した' } }
+        elseif ($before.status -ne $after.status) { "ステータスを「$($after.status)」に" }
+        else { '編集' }
+    $who = if ($after -and $after.updatedBy) { "$($after.updatedBy)：" } else { '他の人：' }
+    Push-Undo "$who$what$(Get-ShortName $row.Tag)" (New-UndoItem $row $before $after) -Other
+}
+
+# ↶・Ctrl＋Z の 1 回で戻す操作の位置（自分の操作のうち一番新しいもの）。無ければ -1
+function Get-OwnUndoIndex {
+    for ($i = $script:undoStack.Count - 1; $i -ge 0; $i--) { if (-not $script:undoStack[$i].other) { return $i } }
+    return -1
 }
 
 function Get-ShortName($t) {
@@ -3125,16 +3147,19 @@ function Set-ItemState($item, $rec) {
     Update-Row $row
 }
 
-# $count 回ぶん、まとめて戻す（進む）。↶ ↷ の右クリックの一覧から選んだところまで一気に動くときに使う
-function Invoke-UndoRedo([bool]$undo, [int]$count = 1) {
+# $count 回ぶん、まとめて戻す（進む）。↶ ↷ の右クリックの一覧から選んだところまで一気に動くときに使う。
+# -Own: ↶・Ctrl＋Z の 1 回。他の人の変更は飛ばして、自分の一番新しい操作だけ戻す
+function Invoke-UndoRedo([bool]$undo, [int]$count = 1, [switch]$Own) {
     # if の結果を代入すると一覧がばらばらになるので、そのまま代入する
     $from = $script:undoStack; $to = $script:redoStack
     if (-not $undo) { $from = $script:redoStack; $to = $script:undoStack }
     if ($from.Count -eq 0) { return }
+    if ($Own -and $undo -and (Get-OwnUndoIndex) -lt 0) { return }
     $done = 0
     while ($done -lt $count -and $from.Count -gt 0) {
-        $entry = $from[$from.Count - 1]
-        $from.RemoveAt($from.Count - 1)
+        $at = if ($Own -and $undo) { Get-OwnUndoIndex } else { $from.Count - 1 }
+        $entry = $from[$at]
+        $from.RemoveAt($at)
         $items = @($entry.items)
         if ($undo) { [array]::Reverse($items) }
         foreach ($it in $items) { Set-ItemState $it $(if ($undo) { $it.before } else { $it.after }) }
@@ -3151,6 +3176,8 @@ function Invoke-UndoRedo([bool]$undo, [int]$count = 1) {
 }
 
 # ↶ ↷ を右クリック: 戻れる（進める）操作の一覧。選んだ操作のところまでまとめて戻る（進む）
+$otherUndoBack = New-Color 222 236 255   # 一覧の、他の人の変更の色
+$otherUndoFore = New-Color 25 85 175
 function Show-UndoList([bool]$undo) {
     $stack = $script:undoStack; if (-not $undo) { $stack = $script:redoStack }
     $btn = if ($undo) { $btnUndo } else { $btnRedo }
@@ -3165,12 +3192,20 @@ function Show-UndoList([bool]$undo) {
         $none.Enabled = $false
     }
     $n = 0
+    $anyOther = $false
     for ($i = $stack.Count - 1; $i -ge 0; $i--) {
         $n++
         $e = $stack[$i]
         $mi = $m.Items.Add("$n. $(if ($e.at) { $e.at + '  ' })$($e.label)")
         $mi.Tag = [pscustomobject]@{ undo = $undo; count = $n }
         $mi.Add_Click({ param($s, $ev) Invoke-UndoRedo $s.Tag.undo $s.Tag.count })
+        if ($e.other) { $mi.BackColor = $otherUndoBack; $mi.ForeColor = $otherUndoFore; $anyOther = $true }   # 他の人の変更は色を変える
+    }
+    if ($anyOther) {
+        $m.Items.Add('-') | Out-Null
+        $legend = $m.Items.Add('青色＝他の人が共有の項目を変えたもの（戻すと共有にも反映されます）')
+        $legend.ForeColor = $otherUndoFore
+        $legend.Enabled = $false
     }
     $m.Add_Closed({ param($s, $ev) $s.BeginInvoke([Action]{ $s.Dispose() }.GetNewClosure()) | Out-Null })
     $script:undoMenu = $m
@@ -3181,21 +3216,24 @@ function Show-UndoList([bool]$undo) {
 $undoNote = @"
 ――――――――――――
 戻せる: チェックを付けた・外した／追加／削除／編集／ステータスの変更／一括操作
-戻せない: 自分用⇔共有の切り替え／削除した項目の添付ファイル／詳細メモの入力／他の人の変更
-※ 記録は付箋を開いている間だけ（最大50件）。閉じると消えます
+　　　 他の人による共有項目の変更（右クリックの一覧に青色で出ます。↶・Ctrl＋Z の 1 回では戻りません）
+戻せない: 自分用⇔共有の切り替え／削除した項目の添付ファイル／詳細メモの入力
+※ 記録は付箋を開いている間だけ（最大100件）。閉じると消えます
 "@
 
 function Get-UndoTip([bool]$undo) {
     $stack = $script:undoStack; if (-not $undo) { $stack = $script:redoStack }
     $head = if ($undo) { '↶ 元に戻す（Ctrl＋Z）　右クリックで一覧から選んでまとめて戻す' } else { '↷ やり直す（Ctrl＋Y）　右クリックで一覧から選んでまとめて進む' }
-    if ($stack.Count -eq 0) {
-        $body = if ($undo) { '戻せる操作はありません' } else { 'やり直せる操作はありません（元に戻したあとに使えます）' }
+    $next = if ($undo) { Get-OwnUndoIndex } else { $stack.Count - 1 }   # ↶ の 1 回は自分の操作だけ
+    if ($next -lt 0) {
+        $body = if ($undo) { '戻せる自分の操作はありません' } else { 'やり直せる操作はありません（元に戻したあとに使えます）' }
+        if ($stack.Count) { $body += "`n（他の人の変更 $($stack.Count) 件は右クリックの一覧から戻せます）" }
         return "$head`n$body`n$undoNote"
     }
     $verb = if ($undo) { '戻る' } else { '進む' }
-    $lines = @("$head", "次に${verb}操作: $($stack[$stack.Count - 1].label)")
+    $lines = @("$head", "次に${verb}操作: $($stack[$next].label)")
     $more = @()
-    for ($i = $stack.Count - 2; $i -ge 0 -and $more.Count -lt 3; $i--) { $more += "　・$($stack[$i].label)" }
+    for ($i = $stack.Count - 1; $i -ge 0 -and $more.Count -lt 3; $i--) { if ($i -ne $next) { $more += "　・$($stack[$i].label)" } }
     if ($more.Count) { $lines += 'その次:'; $lines += $more }
     if ($stack.Count -gt 4) { $lines += "　…ほか $($stack.Count - 4) 件" }
     return (($lines -join "`n") + "`n$undoNote")
@@ -3203,7 +3241,7 @@ function Get-UndoTip([bool]$undo) {
 
 function Update-UndoButtons {
     # 戻せるものがなくても説明は出したいので、ボタンは押せるまま色だけ薄くする（押しても何も起きない）
-    $btnUndo.ForeColor = if ($script:undoStack.Count) { [System.Drawing.Color]::Black } else { [System.Drawing.Color]::Silver }
+    $btnUndo.ForeColor = if ((Get-OwnUndoIndex) -ge 0) { [System.Drawing.Color]::Black } else { [System.Drawing.Color]::Silver }
     $btnRedo.ForeColor = if ($script:redoStack.Count) { [System.Drawing.Color]::Black } else { [System.Drawing.Color]::Silver }
     $tip.SetToolTip($btnUndo, (Get-UndoTip $true))
     $tip.SetToolTip($btnRedo, (Get-UndoTip $false))
@@ -3920,10 +3958,10 @@ $form.Add_KeyDown({
     if (-not $e.Control) { return }
     $ac = $form.ActiveControl
     if ($ac -is [System.Windows.Forms.TextBoxBase] -and -not $ac.ReadOnly) { return }
-    if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Z) { Invoke-UndoRedo $true; $e.SuppressKeyPress = $true }
+    if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Z) { Invoke-UndoRedo $true -Own; $e.SuppressKeyPress = $true }
     elseif ($e.KeyCode -eq [System.Windows.Forms.Keys]::Y) { Invoke-UndoRedo $false; $e.SuppressKeyPress = $true }
 })
-$btnUndo.Add_Click({ Invoke-UndoRedo $true })
+$btnUndo.Add_Click({ Invoke-UndoRedo $true -Own })
 $btnRedo.Add_Click({ Invoke-UndoRedo $false })
 $btnUndo.Add_MouseUp({ param($s, $e) if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) { Show-UndoList $true } })
 $btnRedo.Add_MouseUp({ param($s, $e) if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) { Show-UndoList $false } })
