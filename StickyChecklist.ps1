@@ -185,7 +185,8 @@ $noteColor  = [System.Drawing.Color]::FromArgb(255, 247, 170)
 $barColor   = [System.Drawing.Color]::FromArgb(250, 225, 100)
 $pinColor   = [System.Drawing.Color]::FromArgb(235, 195, 60)
 $redColor   = [System.Drawing.Color]::FromArgb(220, 40, 40)
-$shareColor = [System.Drawing.Color]::FromArgb(40, 120, 210)
+$shareColor = [System.Drawing.Color]::FromArgb(40, 120, 210)        # 全員に共有
+$sharePartColor = [System.Drawing.Color]::FromArgb(40, 150, 80)     # 一部の人に共有（共有先を選んだもの）
 $memoBack   = [System.Drawing.Color]::FromArgb(255, 253, 225)
 $font      = New-Object System.Drawing.Font('Yu Gothic UI', 10)
 $fontDone  = New-Object System.Drawing.Font('Yu Gothic UI', 10, [System.Drawing.FontStyle]::Strikeout)
@@ -271,7 +272,7 @@ function Show-Modal($dlg, $owner) {
     }
 }
 
-# ---------- 丸バッジ（Name が imp なら「重要」赤、share なら「共有」青。Tag が $true で塗りつぶし） ----------
+# ---------- 丸バッジ（Name が imp なら「重要」赤、share なら「共有」青、sharePart なら「共有」緑。Tag が $true で塗りつぶし） ----------
 $badgePaint = {
     param($s, $e)
     $g = $e.Graphics
@@ -285,8 +286,8 @@ $badgePaint = {
     $sf.Alignment = 'Center'
     $sf.LineAlignment = 'Center'
     $rectF = New-Object System.Drawing.RectangleF([single]$x, [single]($y + 1), [single]$d, [single]$d)
-    $label = if ($s.Name -eq 'share') { '共有' } else { '重要' }
-    $color = if ($s.Name -eq 'share') { $shareColor } else { $redColor }
+    $label = if ($s.Name -like 'share*') { '共有' } else { '重要' }
+    $color = if ($s.Name -eq 'sharePart') { $sharePartColor } elseif ($s.Name -eq 'share') { $shareColor } else { $redColor }
     if (-not $s.Enabled) { $color = [System.Drawing.Color]::Gainsboro }
     if ([bool]$s.Tag) {
         $b = New-Object System.Drawing.SolidBrush($color)
@@ -380,6 +381,10 @@ function Get-ScopeText($sel) {
 function Update-ScopeButton($btn) {
     $btn.Text = (Get-ScopeText $btn.Tag) + ' ▾'
     if ($btn.Name -ne 'dlgPicker') { $tip.SetToolTip($btn, '共有範囲: ' + (Get-ScopeText $btn.Tag)) }   # 編集画面のものは付箋本体の説明に登録しない
+    if ($tglShare -and $btn -eq $scopeInput) {   # 入力欄の「共有」も、共有先を選んだら緑
+        $tglShare.Name = if ($btn.Tag.Count -gt 0) { 'sharePart' } else { 'share' }
+        $tglShare.Invalidate()
+    }
 }
 
 function New-ScopePicker {
@@ -1391,6 +1396,8 @@ function Update-Row($row) {
 
     $t.badge.Visible = $t.important
     $t.shareBadge.Visible = $t.shared
+    $kind = if ($t.scope.Count -gt 0) { 'sharePart' } else { 'share' }   # 共有先を選んだものは緑
+    if ($t.shareBadge.Name -ne $kind) { $t.shareBadge.Name = $kind; $t.shareBadge.Invalidate() }
 
     # 期日（上に最終更新日時を小さく、時刻があれば下に小さく）
     $t.dueAt = $null
