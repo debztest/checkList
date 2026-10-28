@@ -34,7 +34,7 @@ static class Launcher
         }
         try
         {
-            try { File.Delete(exePath + ".old"); } catch { }   // 前回の更新で残った古い exe
+            // 前回の更新で残った古い exe（.old）は、次に更新するときまで残しておく（新しい版が動かなかったときの戻し用）
 
             // 起動時: 更新元に新しい版があれば入れ替えて起動し直す
             if (TryUpdate(exePath, baseDir)) { restart = true; return 0; }
@@ -82,10 +82,7 @@ static class Launcher
         {
             try { mutex.ReleaseMutex(); } catch { }
             mutex.Dispose();
-            if (restart)
-            {
-                try { Process.Start(new ProcessStartInfo(exePath) { WorkingDirectory = baseDir, UseShellExecute = true }); } catch { }
-            }
+            if (restart) StartAfterUpdate(exePath, baseDir);
         }
     }
 
@@ -121,23 +118,57 @@ static class Launcher
     }
 
     // 更新元のほうが新しければ、自分と入れ替える（動いている exe は名前を変えられるので .old にしてから置く）。入れ替えたら true
+    // 途中で失敗したとき（ウイルス対策ソフトに新しい exe を消された・止められたなど）は、元の exe に戻して今の版のまま使う
     static bool TryUpdate(string exePath, string baseDir)
     {
+        string tmp = exePath + ".new";
+        string old = exePath + ".old";
+        bool moved = false;
         try
         {
             string src = GetUpdateSource(baseDir);
             if (src == null || !File.Exists(src)) return false;
             if (string.Equals(Path.GetFullPath(src), Path.GetFullPath(exePath), StringComparison.OrdinalIgnoreCase)) return false;   // 自分が更新元
             if (File.GetLastWriteTimeUtc(src) <= File.GetLastWriteTimeUtc(exePath).AddSeconds(2)) return false;   // 新しくない
-            string tmp = exePath + ".new";
             File.Copy(src, tmp, true);   // 日時もそのままコピーされる
-            string old = exePath + ".old";
+            // コピーした exe が消されたり欠けたりしていないか確かめてから入れ替える
+            Thread.Sleep(500);
+            if (!File.Exists(tmp) || new FileInfo(tmp).Length != new FileInfo(src).Length) throw new IOException("コピーした exe が見つからないか、大きさが違います");
             try { File.Delete(old); } catch { }
             File.Move(exePath, old);
+            moved = true;
             File.Move(tmp, exePath);
             return true;
         }
-        catch { return false; }   // 書き込めない場所などは、今の版のまま使う
+        catch
+        {
+            if (moved) Restore(exePath);
+            try { File.Delete(tmp); } catch { }
+            return false;   // 書き込めない場所などは、今の版のまま使う
+        }
+    }
+
+    // 入れ替えた exe が無くなっていたら、.old（入れ替える前の版）を戻す
+    static void Restore(string exePath)
+    {
+        string old = exePath + ".old";
+        try
+        {
+            if (!File.Exists(old)) return;
+            if (File.Exists(exePath)) File.Delete(exePath);
+            File.Move(old, exePath);
+        }
+        catch { }
+    }
+
+    // 更新したあとに起動し直す。新しい exe が消されていたり起動できなかったりしたら、前の版に戻して起動する
+    static void StartAfterUpdate(string exePath, string baseDir)
+    {
+        if (!File.Exists(exePath)) Restore(exePath);
+        try { Process.Start(new ProcessStartInfo(exePath) { WorkingDirectory = baseDir, UseShellExecute = true }); return; }
+        catch { }
+        Restore(exePath);
+        try { Process.Start(new ProcessStartInfo(exePath) { WorkingDirectory = baseDir, UseShellExecute = true }); } catch { }
     }
 
     // フォルダを移動していたらショートカットを今の場所に直す。
