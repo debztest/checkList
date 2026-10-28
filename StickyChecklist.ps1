@@ -496,27 +496,28 @@ $updPanel.BackColor = [System.Drawing.Color]::FromArgb(40, 120, 200)
 $updPanel.Visible = $false
 $lblUpdMsg = New-Object System.Windows.Forms.Label
 $lblUpdMsg.Text = 'Verが変更されました。反映するには更新アイコンを押して下さい'
-$lblUpdMsg.Dock = 'Left'
-$lblUpdMsg.AutoSize = $true
+$lblUpdMsg.Dock = 'Fill'   # 残りの幅いっぱい、文字は上下左右とも真ん中
+$lblUpdMsg.AutoSize = $false
 $lblUpdMsg.Font = New-Object System.Drawing.Font('Yu Gothic UI', 8, [System.Drawing.FontStyle]::Bold)
 $lblUpdMsg.ForeColor = [System.Drawing.Color]::White
-$lblUpdMsg.TextAlign = 'MiddleLeft'
+$lblUpdMsg.TextAlign = 'MiddleCenter'
+$lblUpdMsg.AutoEllipsis = $true
 $lblUpdMsg.UseMnemonic = $false
-$lblUpdMsg.Padding = New-Object System.Windows.Forms.Padding(6, 0, 0, 0)
 $lblUpdInfo = New-Object System.Windows.Forms.Label
 $lblUpdInfo.Text = 'ⓘ'
-$lblUpdInfo.Dock = 'Left'
-$lblUpdInfo.AutoSize = $true
+$lblUpdInfo.Dock = 'Right'   # 右端の上下真ん中
+$lblUpdInfo.AutoSize = $false
+$lblUpdInfo.Width = 30
 $lblUpdInfo.Font = New-Object System.Drawing.Font('Segoe UI Symbol', 11)
 $lblUpdInfo.ForeColor = [System.Drawing.Color]::White
-$lblUpdInfo.TextAlign = 'MiddleLeft'
+$lblUpdInfo.TextAlign = 'MiddleCenter'
 $lblUpdInfo.Cursor = [System.Windows.Forms.Cursors]::Help
 $updTip = New-Object System.Windows.Forms.ToolTip   # 変更内容は長いので、長めに出しておく
 $updTip.AutoPopDelay = 32000
 $updTip.InitialDelay = 100
 $updTip.ToolTipTitle = '新しい版の変更内容'
+$updPanel.Controls.Add($lblUpdMsg)    # 後に足した ⓘ（右端）を先に並べ、残りにお知らせ
 $updPanel.Controls.Add($lblUpdInfo)
-$updPanel.Controls.Add($lblUpdMsg)   # 左から: お知らせ・ⓘ
 
 function New-BarButton([string]$text, [int]$width, [string]$tooltip) {
     $b = New-Object System.Windows.Forms.Button
@@ -2939,6 +2940,7 @@ function Apply-UiScale {
     $lblTotals.Font = $script:zTotals
     $lblUpdMsg.Font = New-Object System.Drawing.Font($script:zTotals, [System.Drawing.FontStyle]::Bold)
     $lblUpdInfo.Font = New-Object System.Drawing.Font('Segoe UI Symbol', [single](11 * $script:zoom))
+    $lblUpdInfo.Width = Z 30
     foreach ($b in $btnUndo, $btnRedo, $btnReload, $btnSort, $btnPin) { $b.Width = Z 36; $b.Font = $script:zIcon }
     $btnFilter.Width = Z 36; $btnFilter.Font = $script:zIconS
     $btnClose.Width = Z 34; $btnClose.Font = New-Object System.Drawing.Font('Yu Gothic UI', [single](11 * $script:zoom), [System.Drawing.FontStyle]::Bold)
