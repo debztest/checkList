@@ -175,7 +175,9 @@ $script:restartForUpdate = $false
 if ($config['RefreshSeconds'] -match '^\d+$' -and [int]$config['RefreshSeconds'] -ge 3) { $refreshSec = [int]$config['RefreshSeconds'] }
 
 $script:stamps = @{}            # ファイルごとの、最後に読んだ／書いたときの更新日時
-$script:sharedError = ''
+$script:sharedError = ''        # 付箋に出す警告（下の 2 つをまとめたもの）
+$script:writeError = ''         # 保存できなかったとき（保存のたびに作り直す）
+$script:readErrors = @{}        # 読めなかったとき（自分用・共有それぞれ。読めたら消す）
 $script:applying = $false       # ファイルの内容を画面に反映中（変更扱いにしない）
 $script:pendingHistory = New-Object System.Collections.ArrayList   # 書き込めなかった履歴（あとで再試行）
 $script:hiddenStatuses = New-Object System.Collections.Generic.List[string]   # 絞り込みで隠すステータス
@@ -1160,19 +1162,37 @@ function Open-Locked([string]$path, [System.IO.FileMode]$mode, [System.IO.FileAc
 }
 
 function Get-Stamp([string]$path) {
-    if (Test-Path -LiteralPath $path) { return [System.IO.File]::GetLastWriteTimeUtc($path) }
+    try { if (Test-Path -LiteralPath $path) { return [System.IO.File]::GetLastWriteTimeUtc($path) } } catch { }
     return [datetime]::MinValue
 }
 
+# 共有フォルダに入れない理由（読めなかったときの表示用）
+$script:readProblem = ''
+$script:storeLoaded = @{}   # 一度でも読めたファイル
+
 # チェックリストのファイルを読む。失敗したら $null
 function Read-ItemFile([string]$path) {
-    if (-not (Test-Path -LiteralPath $path)) { return ,(New-Object System.Collections.ArrayList) }
-    $fs = Open-Locked $path ([System.IO.FileMode]::Open) ([System.IO.FileAccess]::Read) ([System.IO.FileShare]::ReadWrite) 20
-    if (-not $fs) { return $null }
+    $script:readProblem = ''
+    if (-not (Test-Path -LiteralPath $path)) {
+        # フォルダごと見えない（ネットワークが切れた・アクセスを拒否された）ときや、読めていたファイルが見えなくなったときは、
+        # 「空になった」と思って全部消さないように、読めなかった扱いにする
+        $dir = Split-Path $path -Parent
+        if ($dir) {
+            try { [void][System.IO.Directory]::GetFiles($dir, '*.none') }   # 中を見られるか（アクセス拒否・ネットワーク切れなら例外）
+            catch { $script:readProblem = 'folder'; return $null }
+        }
+        if ($script:stamps.ContainsKey($path) -and $script:stamps[$path] -ne [datetime]::MinValue) { $script:readProblem = 'missing'; return $null }
+        return ,(New-Object System.Collections.ArrayList)   # まだ誰も書いていない（新しい共有ファイル）
+    }
+    try {
+        $fs = Open-Locked $path ([System.IO.FileMode]::Open) ([System.IO.FileAccess]::Read) ([System.IO.FileShare]::ReadWrite) 30
+    } catch { $script:readProblem = 'denied'; return $null }   # アクセス拒否など
+    if (-not $fs) { $script:readProblem = 'busy'; return $null }
     try {
         $sr = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8, $true)
         $text = $sr.ReadToEnd()
-    } finally { $fs.Dispose() }
+    } catch { $script:readProblem = 'denied'; return $null }
+    finally { $fs.Dispose() }
     $script:stamps[$path] = Get-Stamp $path
     return ,(ConvertFrom-ItemText $text)
 }
@@ -1754,6 +1774,7 @@ function Update-Totals {
         $text = "●更新$unread  " + $text
         $tipText += "`n● 他の人が更新した項目が ${unread}件あります（色の付いた行）"
     }
+    $script:sharedError = (@($script:writeError) + @($script:readErrors.Values) | Where-Object { $_ }) -join "`n"   # 保存できない・読めない
     if ($script:sharedError) {
         $text = '⚠ ' + $text
         $tipText += "`n⚠ $script:sharedError"
@@ -2332,7 +2353,7 @@ function Sync-Stores {
         }
     }
     Send-PendingHistory
-    $script:sharedError = ($errors -join "`n")
+    $script:writeError = ($errors -join "`n")
     Update-Totals
 }
 
@@ -2344,11 +2365,23 @@ function Update-FromStore([bool]$shared, [switch]$Force, [switch]$Initial) {
     if (-not $Force -and $script:stamps.ContainsKey($path) -and (Get-Stamp $path) -eq $script:stamps[$path]) { return $false }
     try { $records = Read-ItemFile $path } catch { $records = $null }
     if ($null -eq $records) {
-        $script:sharedError = "${name}ファイルを読めませんでした: $path"
+        # 読めなかったときは画面の項目はそのまま。読めるようになったら自動で元に戻る
+        $why = switch ($script:readProblem) {
+            { $_ -in 'folder', 'denied', 'missing' } {
+                "フォルダに接続できないか、アクセスを拒否されました（ネットワーク、またはサインインが切れた）。" +
+                "エクスプローラーで $(Split-Path $path -Parent) を開いてサインインし、「資格情報を記憶する」にチェックしてください"
+            }
+            default   { '他の人が書き込み中で、しばらく開けませんでした' }
+        }
+        $kept = if ($script:storeLoaded[$path]) { '。それまでは前に読めた内容を表示しています' } else { '' }
+        $script:readErrors[$name] = "${name}ファイルを読めませんでした: $why`n$path`n（自動で読み直します$kept）"
         Update-Totals
         return $false
     }
-    if ($script:sharedError -like "${name}ファイルを読めません*") { $script:sharedError = '' }
+    $script:readErrors.Remove($name)
+    # 起動時に読めず、あとで初めて読めたときも起動時と同じ扱い（全部を「New」や他の人の変更として出さない）
+    $first = $Initial -or -not $script:storeLoaded[$path]
+    $script:storeLoaded[$path] = $true
 
     $changed = $false
     $seen = @{}
@@ -2361,7 +2394,7 @@ function Update-FromStore([bool]$shared, [switch]$Force, [switch]$Initial) {
         }
         $seen[$rec.id] = $true
         $row = Find-Row $rec.id
-        $byOther = (-not $Initial) -and $rec.updatedBy -and $rec.updatedBy -ne $script:me
+        $byOther = (-not $first) -and $rec.updatedBy -and $rec.updatedBy -ne $script:me
         if ($row) {
             if ($row.Tag.dirty -or $row.Tag.shared -ne $shared) { continue }   # 自分の未保存の変更を優先
             if ((ConvertTo-ItemLine (ConvertTo-Record $row)) -ne (ConvertTo-ItemLine $rec)) {
@@ -2380,7 +2413,7 @@ function Update-FromStore([bool]$shared, [switch]$Force, [switch]$Initial) {
     }
     # ファイルから消えた（または共有範囲から外れた）項目を消す
     foreach ($r in @($flow.Controls | Where-Object { $_.Tag.shared -eq $shared -and -not $_.Tag.dirty -and -not $seen.ContainsKey($_.Tag.id) })) {
-        if ($shared -and -not $Initial) { Push-OtherUndo $r (ConvertTo-Record $r) $null }   # 誰が消したかは分からない
+        if ($shared -and -not $first) { Push-OtherUndo $r (ConvertTo-Record $r) $null }   # 誰が消したかは分からない
         $flow.Controls.Remove($r)
         $r.Dispose()
         $changed = $true
