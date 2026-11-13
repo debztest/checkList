@@ -900,6 +900,34 @@ $dtpTime.Font = $fontDays
 $dtpTime.Enabled = $false
 $chkTime.Add_CheckedChanged({ $dtpTime.Enabled = $chkTime.Checked })
 
+# 担当（Main）。既定は自分（記載者）。一覧にない名前も入力できる。空欄なら担当なし
+$lblInAssignee = New-Object System.Windows.Forms.Label
+$lblInAssignee.Text = '担当'
+$lblInAssignee.Font = $fontBar
+$lblInAssignee.Dock = 'Left'
+$lblInAssignee.Width = 44
+$lblInAssignee.TextAlign = 'MiddleRight'
+
+$cmbInAssignee = New-Object System.Windows.Forms.ComboBox
+$cmbInAssignee.DropDownStyle = 'DropDown'
+$cmbInAssignee.Dock = 'Left'
+$cmbInAssignee.Width = 110
+$cmbInAssignee.Font = $fontDays
+$cmbInAssignee.AutoCompleteMode = 'SuggestAppend'
+$cmbInAssignee.AutoCompleteSource = 'ListItems'
+$tip.SetToolTip($cmbInAssignee, '担当者（Main）。最初は自分。空欄なら担当なし')
+function Update-InAssigneeItems {   # メンバーは増えることがあるので、開くたびに作り直す
+    $keep = $cmbInAssignee.Text
+    $cmbInAssignee.Items.Clear()
+    $cmbInAssignee.Items.Add('') | Out-Null
+    foreach ($n in @($script:me) + @(Get-Members)) { if ($n -and -not $cmbInAssignee.Items.Contains($n)) { $cmbInAssignee.Items.Add($n) | Out-Null } }
+    $cmbInAssignee.Text = $keep
+}
+$cmbInAssignee.Add_DropDown({ Update-InAssigneeItems })
+$cmbInAssignee.Text = $script:me
+
+$line2.Controls.Add($cmbInAssignee)
+$line2.Controls.Add($lblInAssignee)
 $line2.Controls.Add($dtpTime)
 $line2.Controls.Add($chkTime)
 $line2.Controls.Add($dtpDue)
@@ -986,6 +1014,7 @@ function Reset-InputOptions {
     $tglShare.Tag = $false
     $tglShare.Invalidate()
     Set-PickerScope $scopeInput @()
+    $cmbInAssignee.Text = $script:me
 }
 
 # ---------- 右クリックメニュー ----------
@@ -1247,6 +1276,21 @@ function Add-History($row, [string]$status, [string]$comment) {
     $path = Get-HistoryPath (Get-StorePath $t)
     try { $ok = Write-HistoryLine $path $line } catch { $ok = $false }
     if (-not $ok) { $script:pendingHistory.Add(@($path, $line)) | Out-Null }
+}
+
+# チェックを外したときに戻すステータス: 履歴で一番新しい「完了」以外のステータス。無ければ未着手
+function Get-StatusBeforeDone($t) {
+    foreach ($h in (Read-History $t)) { if ($h.status -and $h.status -ne '完了' -and $statusList -contains $h.status) { return $h.status } }
+    return '未着手'
+}
+
+# ステータスに合わせてチェックを付け外しする（完了ならチェック、それ以外は外す）。チェックの処理は動かさない
+function Set-DoneByStatus($row) {
+    $want = ($row.Tag.status -eq '完了')
+    if ($row.Tag.cb.Checked -ne $want) {
+        $script:applying = $true
+        try { $row.Tag.cb.Checked = $want } finally { $script:applying = $false }
+    }
 }
 
 function Send-PendingHistory {
@@ -1976,6 +2020,10 @@ function New-Row {
         $r.Tag.unread = $false
         $before = ConvertTo-Record $r                         # 元に戻す用（チェックだけ前の状態に）
         $before.done = $(if ($s.Checked) { '0' } else { '1' })
+        # チェックを付けたらステータスも完了に、外したら完了の前のステータスに戻す
+        $t = $r.Tag
+        if ($s.Checked -and $t.status -ne '完了') { Add-History $r '完了' 'チェックを付けた'; $t.status = '完了'; $t.note = '' }
+        elseif (-not $s.Checked -and $t.status -eq '完了') { $st = Get-StatusBeforeDone $t; Add-History $r $st 'チェックを外した'; $t.status = $st; $t.note = '' }
         Set-Dirty $r
         Push-Undo "$(if ($s.Checked) { 'チェックを付けた' } else { 'チェックを外した' })$(Get-ShortName $r.Tag)" (New-UndoItem $r $before (ConvertTo-Record $r))
         Update-Row $r; Apply-Filter; Save-Data
@@ -2262,7 +2310,8 @@ function Add-FromInput {
             status = '未着手'; key = $key; text = $text; memo = ''
             owner = $script:me; scope = $(if ($shared) { if ($scopeInput.Tag.Count -eq 0) { '全員' } else { $scopeInput.Tag -join ',' } } else { '' })
             updatedAt = ''; updatedBy = ''; note = ''; files = ''
-            createdAt = (Get-Date).ToString('yyyy-MM-dd HH:mm'); assignee = ''; subAssignee = ''
+            createdAt = (Get-Date).ToString('yyyy-MM-dd HH:mm'); subAssignee = ''
+            assignee = ($cmbInAssignee.Text -replace "[\t\r\n,]+", ' ').Trim()   # 既定は自分（記載者）
         }
         $row = Add-RowFromRecord $rec $shared
         Set-Dirty $row
@@ -2292,6 +2341,7 @@ function Set-RowStatus($row, [string]$status, [string]$comment) {
     $t.status = $status
     if ($comment) { $t.note = $comment }
     elseif ($statusChanged) { $t.note = '' }   # 理由なしでステータスだけ変えたら、前の理由は消す
+    Set-DoneByStatus $row                       # 完了ならチェックも付ける
     $t.unread = $false
     Set-Dirty $row
     if ($statusChanged) { Push-Undo "ステータスを「$status」に$(Get-ShortName $t)" (New-UndoItem $row $before (ConvertTo-Record $row)) }
@@ -2393,6 +2443,9 @@ function Update-FromStore([bool]$shared, [switch]$Force, [switch]$Initial) {
             if (-not (Test-Visible $rec)) { continue }
         }
         $seen[$rec.id] = $true
+        # チェック済みなのに完了になっていない項目（前の版で付けたもの）は完了にして書き戻す。更新者・日時は変えない
+        $fixDone = ($rec.done -eq '1' -and $rec.status -ne '完了')
+        if ($fixDone) { $rec.status = '完了' }
         $row = Find-Row $rec.id
         $byOther = (-not $first) -and $rec.updatedBy -and $rec.updatedBy -ne $script:me
         if ($row) {
@@ -2410,6 +2463,7 @@ function Update-FromStore([bool]$shared, [switch]$Force, [switch]$Initial) {
             if ($byOther -and $shared) { Push-OtherUndo $row $null $rec }
             $changed = $true
         }
+        if ($fixDone) { $row.Tag.dirty = $true }   # 次の保存で書き戻す
     }
     # ファイルから消えた（または共有範囲から外れた）項目を消す
     foreach ($r in @($flow.Controls | Where-Object { $_.Tag.shared -eq $shared -and -not $_.Tag.dirty -and -not $seen.ContainsKey($_.Tag.id) })) {
@@ -2881,6 +2935,7 @@ function Edit-Row($row) {
         Add-History $row $r.status $r.note
         if ($r.note) { $t.note = $r.note } elseif ($r.status -ne $t.status) { $t.note = '' }
         $t.status = $r.status
+        Set-DoneByStatus $row   # 完了ならチェックも付ける
     }
 
     if ($r.key -and $r.key -ne $t.key) { Register-KeyUse $r.key }
@@ -2996,6 +3051,8 @@ function Apply-UiScale {
     $dtpDue.Font = $script:zUi; $dtpDue.Width = Z 132
     $chkTime.Width = Z 24
     $dtpTime.Font = $script:zUi; $dtpTime.Width = Z 66
+    $lblInAssignee.Font = $script:zUiBold; $lblInAssignee.Width = Z 48
+    $cmbInAssignee.Font = $script:zUi; $cmbInAssignee.Width = Z 120
     $line3.Height = [Math]::Max($script:badgeW + 2, $script:zUi.Height + 14)
     $lblShare.Font = $script:zUiBold; $lblShare.Width = Z 52
     $scopeInput.Font = $script:zUi
@@ -3431,7 +3488,7 @@ function Set-BulkPerson([string]$field, [string]$name) {
 function Set-BulkStatus([string]$status) {
     Invoke-Bulk {
         param($r, $st)
-        if ($r.Tag.status -ne $st) { Add-History $r $st '（一括変更）'; $r.Tag.status = $st; $r.Tag.note = '' }
+        if ($r.Tag.status -ne $st) { Add-History $r $st '（一括変更）'; $r.Tag.status = $st; $r.Tag.note = ''; Set-DoneByStatus $r }
     } $status -Label "ステータスを「$status」に"
 }
 function Set-BulkShare([bool]$share, [string[]]$scope) {
