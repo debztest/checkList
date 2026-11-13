@@ -900,7 +900,7 @@ $dtpTime.Font = $fontDays
 $dtpTime.Enabled = $false
 $chkTime.Add_CheckedChanged({ $dtpTime.Enabled = $chkTime.Checked })
 
-# 担当（Main）。既定は自分（記載者）。一覧にない名前も入力できる。空欄なら担当なし
+# 担当（Main）。既定は自分（記載者）。一覧にない名前も入力できる。空欄でも自分
 $lblInAssignee = New-Object System.Windows.Forms.Label
 $lblInAssignee.Text = '担当'
 $lblInAssignee.Font = $fontBar
@@ -915,7 +915,7 @@ $cmbInAssignee.Width = 110
 $cmbInAssignee.Font = $fontDays
 $cmbInAssignee.AutoCompleteMode = 'SuggestAppend'
 $cmbInAssignee.AutoCompleteSource = 'ListItems'
-$tip.SetToolTip($cmbInAssignee, '担当者（Main）。最初は自分。空欄なら担当なし')
+$tip.SetToolTip($cmbInAssignee, '担当者（Main）。最初は自分。空欄でも自分（作成者）になります')
 function Update-InAssigneeItems {   # メンバーは増えることがあるので、開くたびに作り直す
     $keep = $cmbInAssignee.Text
     $cmbInAssignee.Items.Clear()
@@ -1276,6 +1276,13 @@ function Add-History($row, [string]$status, [string]$comment) {
     $path = Get-HistoryPath (Get-StorePath $t)
     try { $ok = Write-HistoryLine $path $line } catch { $ok = $false }
     if (-not $ok) { $script:pendingHistory.Add(@($path, $line)) | Out-Null }
+}
+
+# 担当者（Main）が空のときに入れる人: 作成者。自分用で作成者が空の古い項目は自分
+function Get-DefaultAssignee([string]$owner, [bool]$shared) {
+    if ($owner) { return $owner }
+    if (-not $shared) { return $script:me }
+    return ''
 }
 
 # チェックを外したときに戻すステータス: 履歴で一番新しい「完了」以外のステータス。無ければ未着手
@@ -2313,6 +2320,7 @@ function Add-FromInput {
             createdAt = (Get-Date).ToString('yyyy-MM-dd HH:mm'); subAssignee = ''
             assignee = ($cmbInAssignee.Text -replace "[\t\r\n,]+", ' ').Trim()   # 既定は自分（記載者）
         }
+        if (-not $rec.assignee) { $rec.assignee = $script:me }   # 空欄なら作成者（自分）
         $row = Add-RowFromRecord $rec $shared
         Set-Dirty $row
         Push-Undo "追加$(Get-ShortName $row.Tag)" (New-UndoItem $row $null (ConvertTo-Record $row))
@@ -2446,6 +2454,11 @@ function Update-FromStore([bool]$shared, [switch]$Force, [switch]$Initial) {
         # チェック済みなのに完了になっていない項目（前の版で付けたもの）は完了にして書き戻す。更新者・日時は変えない
         $fixDone = ($rec.done -eq '1' -and $rec.status -ne '完了')
         if ($fixDone) { $rec.status = '完了' }
+        # 担当者（Main）が空の項目は作成者にする（自分用で作成者が空の古い項目は自分）
+        if (-not $rec.assignee) {
+            $creator = Get-DefaultAssignee $rec.owner $shared
+            if ($creator) { $rec.assignee = $creator; $fixDone = $true }
+        }
         $row = Find-Row $rec.id
         $byOther = (-not $first) -and $rec.updatedBy -and $rec.updatedBy -ne $script:me
         if ($row) {
@@ -2779,7 +2792,7 @@ function Show-EditDialog($row) {
     }
     $cmbAssignee = New-PersonCombo $t.assignee 60
     $cmbSub = New-PersonCombo $t.subAssignee 208
-    $dlgTip.SetToolTip($cmbAssignee, '担当者（空欄ならなし）')
+    $dlgTip.SetToolTip($cmbAssignee, '担当者（空欄なら作成者）')
     $dlgTip.SetToolTip($cmbSub, 'サブ担当者（空欄ならなし）')
 
     if (-not $sharingOn) {
@@ -2952,6 +2965,7 @@ function Edit-Row($row) {
     if ($r.subAssignee -ne [string]$t.subAssignee) { $changes += "サブ担当者: $(Get-PersonText $t.subAssignee) → $(Get-PersonText $r.subAssignee)" }
     if ($changes.Count) { Add-History $row $t.status ($changes -join '、') }
     $t.assignee = $r.assignee
+    if (-not $t.assignee) { $t.assignee = Get-DefaultAssignee $t.owner $t.shared }   # 空にしたら作成者
     $t.subAssignee = $r.subAssignee
     if (-not $t.createdAt) { $t.createdAt = Get-CreatedAt $t }   # 古い項目も、分かる記載日は記録しておく
     $script:applying = $true
@@ -3479,9 +3493,11 @@ function Set-BulkPerson([string]$field, [string]$name) {
     Invoke-Bulk {
         param($r, $a)
         $old = [string]$r.Tag.($a[0])
-        if ($old -ne $a[1]) {
-            Add-History $r $r.Tag.status "$($a[2]): $(Get-PersonText $old) → $(Get-PersonText $a[1])（一括変更）"
-            $r.Tag.($a[0]) = $a[1]
+        $new = $a[1]
+        if ($a[0] -eq 'assignee' -and -not $new) { $new = Get-DefaultAssignee $r.Tag.owner $r.Tag.shared }   # Main を「なし」にしたら作成者
+        if ($old -ne $new) {
+            Add-History $r $r.Tag.status "$($a[2]): $(Get-PersonText $old) → $(Get-PersonText $new)（一括変更）"
+            $r.Tag.($a[0]) = $new
         }
     } @($field, $name, $label) -Label "${label}を「$(Get-PersonText $name)」に"
 }
